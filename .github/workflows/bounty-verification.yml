@@ -1,0 +1,134 @@
+name: Bounty verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: "Branch, tag, or SHA to verify"
+        required: true
+        default: "master"
+      run_packaging:
+        description: "Run Docker packaging builds"
+        required: true
+        type: boolean
+        default: true
+      run_functional:
+        description: "Run functional tests on a configured self-hosted Linux runner"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bounty-verification-${{ inputs.target_ref }}
+  cancel-in-progress: false
+
+jobs:
+  unit-and-build:
+    name: Unit tests and build
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Check out target ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_ref }}
+          fetch-depth: 0
+
+      - name: Install dependencies
+        uses: ./.github/actions/install-build-deps
+        with:
+          extra-packages: libcmocka-dev python3-pytest python3-pytest-mock
+
+      - name: Build
+        run: make
+
+      - name: Run full unit test suite
+        run: make test
+
+      - name: Check diff whitespace
+        run: git diff --check HEAD~1 HEAD || git diff --check
+
+  packaging:
+    name: Packaging (${{ matrix.target }})
+    if: ${{ inputs.run_packaging }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [debian, fedora, arch]
+
+    steps:
+      - name: Check out target ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_ref }}
+          fetch-depth: 0
+
+      - name: Build package with Docker
+        run: make build-${{ matrix.target }}
+
+  functional:
+    name: Functional tests on self-hosted Linux
+    if: ${{ inputs.run_functional }}
+    runs-on: [self-hosted, linux]
+
+    steps:
+      - name: Check out target ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_ref }}
+          fetch-depth: 0
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            fdisk \
+            libudisks2-dev \
+            libxml2-dev \
+            python-is-python3 \
+            python3-dotenv \
+            python3-pytest \
+            python3-pytest-mock \
+            libpam0g-dev \
+            devscripts \
+            debhelper \
+            dkms \
+            pkg-config \
+            gir1.2-glib-2.0 \
+            libglib2.0-dev \
+            libevdev-dev \
+            libcmocka-dev
+
+      - name: Build Debian package
+        run: make deb
+
+      - name: Install generated package
+        run: sudo DEBIAN_FRONTEND=noninteractive apt install --reinstall -yq ../*.deb
+
+      - name: Prepare dummy USB device
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd tests/can-actually-be-used
+          sudo modprobe dummy_hcd is_high_speed=1 || sudo modprobe dummy-hcd is_high_speed=1 || ./setup-dummyhcd.sh
+          ./prepare-mounting.sh
+          ./create-image.sh
+          ./mount-image.sh
+
+      - name: Run functional tests
+        run: |
+          cd tests/can-actually-be-used
+          ./run-tests.sh
+
+      - name: Cleanup functional test state
+        if: always()
+        shell: bash
+        run: |
+          cd tests/can-actually-be-used
+          ./umount-image.sh || true
+          sudo apt purge --yes libpam-usb || true
