@@ -1,4 +1,5 @@
 name: Bounty verification
+run-name: Verify ${{ inputs.target_ref }}
 
 on:
   workflow_dispatch:
@@ -36,6 +37,11 @@ jobs:
         with:
           ref: ${{ inputs.target_ref }}
           fetch-depth: 0
+
+      - name: Record verification target
+        run: |
+          echo "Target ref: \`${{ inputs.target_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Target SHA: \`$(git rev-parse HEAD)\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install dependencies
         uses: ./.github/actions/install-build-deps
